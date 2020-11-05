@@ -125,7 +125,7 @@ function getContextForSubtree(
 
   return parentContext;
 }
-
+//计划更新Root
 function scheduleRootUpdate(
   current: Fiber,
   element: ReactNodeList,
@@ -150,8 +150,8 @@ function scheduleRootUpdate(
       );
     }
   }
-
-  const update = createUpdate(expirationTime, suspenseConfig);
+  //创建更新的时间节点
+  const update = createUpdate(expirationTime);
   // Caution: React DevTools currently depends on this property
   // being called "element".
   update.payload = {element};
@@ -170,12 +170,17 @@ function scheduleRootUpdate(
   if (revertPassiveEffectsChange) {
     flushPassiveEffects();
   }
+  //一整个React应用中，会有多次更新，而这多次更新均在更新队列中
   enqueueUpdate(current, update);
+  //进行任务调度
+  //当React进行Update后，就要进行调度
+  //即 根据任务的优先级去调度任务
+  //先执行优先级高的任务，
   scheduleWork(current, expirationTime);
 
   return expirationTime;
 }
-
+//在过期时间内，更新container
 export function updateContainerAtExpirationTime(
   element: ReactNodeList,
   container: OpaqueRoot,
@@ -198,14 +203,14 @@ export function updateContainerAtExpirationTime(
       }
     }
   }
-
+  //由于parentComponent为null,所以返回空对象{}
   const context = getContextForSubtree(parentComponent);
   if (container.context === null) {
     container.context = context;
   } else {
     container.pendingContext = context;
   }
-
+  // 计划更新Root
   return scheduleRootUpdate(
     current,
     element,
@@ -303,7 +308,7 @@ export function createContainer(
 ): OpaqueRoot {
   return createFiberRoot(containerInfo, tag, hydrate);
 }
-
+//更新Container
 export function updateContainer(
   element: ReactNodeList,
   container: OpaqueRoot,
@@ -311,7 +316,13 @@ export function updateContainer(
   callback: ?Function,
 ): ExpirationTime {
   const current = container.current;
+  //1073741823
+  // Math.pow(2, 30) - 1
+  // 0b111111111111111111111111111111
+  //整型最大数值，是V8中针对32位系统所设置的最大值
+
   const currentTime = requestCurrentTime();
+
   if (__DEV__) {
     // $FlowExpectedError - jest isn't a global, and isn't recognized outside of tests
     if ('undefined' !== typeof jest) {
@@ -320,6 +331,8 @@ export function updateContainer(
     }
   }
   const suspenseConfig = requestCurrentSuspenseConfig();
+  // 计算过期时间，这是React优先级更新非常重要的点
+  // 每到过期时间，就更新container，过期时间单位为 10ms
   const expirationTime = computeExpirationForFiber(
     currentTime,
     current,
@@ -350,10 +363,12 @@ export {
   flushPassiveEffects,
   IsThisRendererActing,
 };
-
+//获取root实例
 export function getPublicRootInstance(
   container: OpaqueRoot,
 ): React$Component<any, any> | PublicInstance | null {
+  //看到container.current，感觉有点类似ref（xxx.current）
+  //获取当前节点
   const containerFiber = container.current;
   if (!containerFiber.child) {
     return null;

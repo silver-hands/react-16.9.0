@@ -270,6 +270,7 @@ if (
   channel.port1.onmessage = performWorkUntilDeadline;
 
   const onAnimationFrame = rAFTime => {
+    // 没有需要进行的任务，退出
     if (scheduledHostCallback === null) {
       // No scheduled work. Exit.
       prevRAFTime = -1;
@@ -287,27 +288,38 @@ if (
     // browser skipping a frame and not firing the callback until the frame
     // after that.
     isRAFLoopRunning = true;
+    // 在 requestAnimationFrame 中又启动了一个 requestAnimationFrame
+    // 第二个 requestAnimationFrame 比第一个的时间晚一帧
+    // 有callback的情况下，保证每一帧都在执行 react 代码
     requestAnimationFrame(nextRAFTime => {
+      // 清除定时器
       clearTimeout(rAFTimeoutID);
+      // 递归调用直到任务结束
       onAnimationFrame(nextRAFTime);
     });
 
     // requestAnimationFrame is throttled when the tab is backgrounded. We
     // don't want to stop working entirely. So we'll fallback to a timeout loop.
     // TODO: Need a better heuristic for backgrounded work.
+
+    // 默认浏览器的帧频是 30， 所以默认一帧的时间是33.3ms
+    // frameLength 代表默认的一帧的时间
     const onTimeout = () => {
       frameDeadline = getCurrentTime() + frameLength / 2;
       performWorkUntilDeadline();
       rAFTimeoutID = setTimeout(onTimeout, frameLength * 3);
     };
+    // 设定一个定时器，3 帧 以后执行 onTimeout 方法
     rAFTimeoutID = setTimeout(onTimeout, frameLength * 3);
 
+    // 判断上一帧执行的时间是否存在，并且和这一帧之间至少相隔 0.1ms
     if (
       prevRAFTime !== -1 &&
       // Make sure this rAF time is different from the previous one. This check
       // could fail if two rAFs fire in the same frame.
       rAFTime - prevRAFTime > 0.1
     ) {
+      // rAFInterval 记录两帧的间隔
       const rAFInterval = rAFTime - prevRAFTime;
       if (!fpsLocked && prevRAFInterval !== -1) {
         // We've observed two consecutive frame intervals. We'll use this to
@@ -319,6 +331,9 @@ if (
         // optimizing. For example, if we're running on 120hz display or 90hz VR
         // display. Take the max of the two in case one of them was an anomaly
         // due to missed frame deadlines.
+
+        // 通过两个连续的帧间隔，动态调整帧速率
+        // 如果两帧连续短, 则使用较长的帧作为新的 frameLength
         if (rAFInterval < frameLength && prevRAFInterval < frameLength) {
           frameLength =
             rAFInterval < prevRAFInterval ? prevRAFInterval : rAFInterval;
@@ -326,13 +341,20 @@ if (
             // Defensive coding. We don't support higher frame rates than 120hz.
             // If the calculated frame length gets lower than 8, it is probably
             // a bug.
+           // 设定最小为 8.33 也就是120HZ
+          // React 不支持每一帧比 8ms 还要短
+          // 小于 8ms 的话，强制至少有 8ms 来执行调度
             frameLength = 8.33;
           }
         }
       }
       prevRAFInterval = rAFInterval;
     }
+    // 将这一个帧执行的时间赋给 prevRAFTime
     prevRAFTime = rAFTime;
+    // frameDeadline 表示下一帧执行的最大时间
+    // 保证浏览器最少能够达到 30 帧。
+    // 当然，由于 frameLength 被调整过，这个值是动态变化的 
     frameDeadline = rAFTime + frameLength;
 
     // We use the postMessage trick to defer idle work until after the repaint.
@@ -347,9 +369,13 @@ if (
         port.postMessage(null);
       }
     } else {
+      // isRAFLoopRunning 起到了锁的作用
       if (!isRAFLoopRunning) {
         // Start a rAF loop.
         isRAFLoopRunning = true;
+
+        // 在每一帧内执行调度任务
+        // rAFTime 是 requestAnimationFrame() 开始去执行回调函数的时刻
         requestAnimationFrame(rAFTime => {
           if (requestIdleCallbackBeforeFirstFrame) {
             cancelIdleCallback(idleCallbackID);

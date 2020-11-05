@@ -8,7 +8,6 @@
  */
 
 import type {ReactNodeList} from 'shared/ReactTypes';
-import type {RootTag} from 'shared/ReactRootTags';
 // TODO: This type is shared between the reconciler and ReactDOM, but will
 // eventually be lifted out to the renderer.
 import type {
@@ -26,19 +25,16 @@ import {
   flushRoot,
   createContainer,
   updateContainer,
-  batchedEventUpdates,
   batchedUpdates,
   unbatchedUpdates,
-  discreteUpdates,
-  flushDiscreteUpdates,
+  interactiveUpdates,
+  flushInteractiveUpdates,
   flushSync,
   flushControlled,
   injectIntoDevTools,
   getPublicRootInstance,
   findHostInstance,
   findHostInstanceWithWarning,
-  flushPassiveEffects,
-  IsThisRendererActing,
 } from 'react-reconciler/inline.dom';
 import {createPortal as createPortalImpl} from 'shared/ReactPortal';
 import {canUseDOM} from 'shared/ExecutionEnvironment';
@@ -48,14 +44,15 @@ import {
   enqueueStateRestore,
   restoreStateIfNeeded,
 } from 'events/ReactControlledComponent';
-import {injection as EventPluginHubInjection} from 'events/EventPluginHub';
-import {runEventsInBatch} from 'events/EventBatching';
+import {
+  injection as EventPluginHubInjection,
+  runEventsInBatch,
+} from 'events/EventPluginHub';
 import {eventNameDispatchConfigs} from 'events/EventPluginRegistry';
 import {
   accumulateTwoPhaseDispatches,
   accumulateDirectDispatches,
 } from 'events/EventPropagators';
-import {LegacyRoot, ConcurrentRoot, BatchedRoot} from 'shared/ReactRootTags';
 import {has as hasInstance} from 'shared/ReactInstanceMap';
 import ReactVersion from 'shared/ReactVersion';
 import ReactSharedInternals from 'shared/ReactSharedInternals';
@@ -79,6 +76,8 @@ import {
   DOCUMENT_NODE,
   DOCUMENT_FRAGMENT_NODE,
 } from '../shared/HTMLNodeType';
+//服务端渲染的话，会在React App的第一个元素上添加该属性
+//以标识是服务端渲染的
 import {ROOT_ATTRIBUTE_NAME} from '../shared/DOMProperty';
 
 const ReactCurrentOwner = ReactSharedInternals.ReactCurrentOwner;
@@ -161,11 +160,11 @@ setRestoreImplementation(restoreControlledState);
 
 export type DOMContainer =
   | (Element & {
-      _reactRootContainer: ?(_ReactRoot | _ReactSyncRoot),
+      _reactRootContainer: ?Root,
       _reactHasBeenPassedToCreateRootDEV: ?boolean,
     })
   | (Document & {
-      _reactRootContainer: ?(_ReactRoot | _ReactSyncRoot),
+      _reactRootContainer: ?Root,
       _reactHasBeenPassedToCreateRootDEV: ?boolean,
     });
 
@@ -177,7 +176,7 @@ type Batch = FiberRootBatch & {
   // The ReactRoot constructor is hoisted but the prototype methods are not. If
   // we move ReactRoot to be above ReactBatch, the inverse error occurs.
   // $FlowFixMe Hoisting issue.
-  _root: _ReactRoot | _ReactSyncRoot,
+  _root: Root,
   _hasChildren: boolean,
   _children: ReactNodeList,
 
@@ -185,18 +184,20 @@ type Batch = FiberRootBatch & {
   _didComplete: boolean,
 };
 
-type _ReactSyncRoot = {
+type Root = {
   render(children: ReactNodeList, callback: ?() => mixed): Work,
   unmount(callback: ?() => mixed): Work,
+  legacy_renderSubtreeIntoContainer(
+    parentComponent: ?React$Component<any, any>,
+    children: ReactNodeList,
+    callback: ?() => mixed,
+  ): Work,
+  createBatch(): Batch,
 
   _internalRoot: FiberRoot,
 };
 
-type _ReactRoot = _ReactSyncRoot & {
-  createBatch(): Batch,
-};
-
-function ReactBatch(root: _ReactRoot | _ReactSyncRoot) {
+function ReactBatch(root: ReactRoot) {
   const expirationTime = computeUniqueAsyncExpiration();
   this._expirationTime = expirationTime;
   this._root = root;
@@ -222,7 +223,6 @@ ReactBatch.prototype.render = function(children: ReactNodeList) {
     internalRoot,
     null,
     expirationTime,
-    null,
     work._onCommit,
   );
   return work;
@@ -324,11 +324,15 @@ type Work = {
   _didCommit: boolean,
 };
 
+// 以下几个 ReactWork 相关的方法没啥好说的
+// 主体功能就是把回调函数丢入 this._callback 中
+// 然后在需要的时候执行一次 this._callback 中的所有函数
 function ReactWork() {
   this._callbacks = null;
   this._didCommit = false;
   // TODO: Avoid need to bind by replacing callbacks in the update queue with
   // list of Work objects.
+  // 这里固定了一下 this，以防取不到正确的 this
   this._onCommit = this._onCommit.bind(this);
 }
 ReactWork.prototype.then = function(onCommit: () => mixed): void {
@@ -364,41 +368,37 @@ ReactWork.prototype._onCommit = function(): void {
   }
 };
 
-function ReactSyncRoot(
+function ReactRoot(
   container: DOMContainer,
-  tag: RootTag,
+  isConcurrent: boolean,
   hydrate: boolean,
 ) {
-  // Tag is either LegacyRoot or Concurrent Root
-  const root = createContainer(container, tag, hydrate);
+  // 这个 root 指的是 FiberRoot
+  const root = createContainer(container, isConcurrent, hydrate);
   this._internalRoot = root;
 }
-
-function ReactRoot(container: DOMContainer, hydrate: boolean) {
-  const root = createContainer(container, ConcurrentRoot, hydrate);
-  this._internalRoot = root;
-}
-
-ReactRoot.prototype.render = ReactSyncRoot.prototype.render = function(
+ReactRoot.prototype.render = function(
   children: ReactNodeList,
   callback: ?() => mixed,
 ): Work {
+  // 这里指 FiberRoot
   const root = this._internalRoot;
+  // ReactWork 的功能就是为了在组件渲染或更新后把所有传入
+  // ReactDom.render 中的回调函数全部执行一遍
   const work = new ReactWork();
   callback = callback === undefined ? null : callback;
   if (__DEV__) {
     warnOnInvalidCallback(callback, 'render');
   }
+  // 如果有 callback，就 push 进 work 中的数组
   if (callback !== null) {
     work.then(callback);
   }
+  // work._onCommit 就是用于执行所有回调函数的
   updateContainer(children, root, null, work._onCommit);
   return work;
 };
-
-ReactRoot.prototype.unmount = ReactSyncRoot.prototype.unmount = function(
-  callback: ?() => mixed,
-): Work {
+ReactRoot.prototype.unmount = function(callback: ?() => mixed): Work {
   const root = this._internalRoot;
   const work = new ReactWork();
   callback = callback === undefined ? null : callback;
@@ -411,8 +411,23 @@ ReactRoot.prototype.unmount = ReactSyncRoot.prototype.unmount = function(
   updateContainer(null, root, null, work._onCommit);
   return work;
 };
-
-// Sync roots cannot create batches. Only concurrent ones.
+ReactRoot.prototype.legacy_renderSubtreeIntoContainer = function(
+  parentComponent: ?React$Component<any, any>,
+  children: ReactNodeList,
+  callback: ?() => mixed,
+): Work {
+  const root = this._internalRoot;
+  const work = new ReactWork();
+  callback = callback === undefined ? null : callback;
+  if (__DEV__) {
+    warnOnInvalidCallback(callback, 'render');
+  }
+  if (callback !== null) {
+    work.then(callback);
+  }
+  updateContainer(children, root, parentComponent, work._onCommit);
+  return work;
+};
 ReactRoot.prototype.createBatch = function(): Batch {
   const batch = new ReactBatch(this);
   const expirationTime = batch._expirationTime;
@@ -459,47 +474,56 @@ function isValidContainer(node) {
         node.nodeValue === ' react-mount-point-unstable '))
   );
 }
-
+//获取Container里的RectRoot元素
+//返回document节点或第一个子节点
 function getReactRootElementInContainer(container: any) {
   if (!container) {
     return null;
   }
-
+  //DOCUMENT_NODE 即 window.document
   if (container.nodeType === DOCUMENT_NODE) {
     return container.documentElement;
   } else {
     return container.firstChild;
   }
 }
-
+//判断是否是服务端渲染
 function shouldHydrateDueToLegacyHeuristic(container) {
+  //获取container的第一个节点（根节点）
+  //也就是 id='root' 的节点
   const rootElement = getReactRootElementInContainer(container);
   return !!(
     rootElement &&
     rootElement.nodeType === ELEMENT_NODE &&
+    //判断是否是服务端渲染
     rootElement.hasAttribute(ROOT_ATTRIBUTE_NAME)
   );
 }
 
 setBatchingImplementation(
   batchedUpdates,
-  discreteUpdates,
-  flushDiscreteUpdates,
-  batchedEventUpdates,
+  interactiveUpdates,
+  flushInteractiveUpdates,
 );
 
 let warnedAboutHydrateAPI = false;
-
+//创建ReactRooter
 function legacyCreateRootFromDOMContainer(
   container: DOMContainer,
   forceHydrate: boolean,
-): _ReactSyncRoot {
+): Root {
+  // 还是和 SSR 有关，不管这部分
   const shouldHydrate =
+  //render的forceHydrate是false，所以会调用shouldHydrateDueToLegacyHeuristic方法来判断是否是服务端渲染
     forceHydrate || shouldHydrateDueToLegacyHeuristic(container);
   // First clear any existing content.
+   //如果不是服务端渲染的话
   if (!shouldHydrate) {
     let warned = false;
     let rootSibling;
+    // container 内部如果有元素的话，就全部清掉
+    // 但是一般来说我们都是这样写 container 的： <div id='root'></div>
+    // 所以说 container 内部不要写任何的节点，一是会被清掉，二是还要进行 DOM 操作，可能还会涉及到重绘回流等等
     while ((rootSibling = container.lastChild)) {
       if (__DEV__) {
         if (
@@ -530,11 +554,18 @@ function legacyCreateRootFromDOMContainer(
       );
     }
   }
+  // Legacy roots are not async by default.
+  // 对于 Root 来说不需要异步
+  const isConcurrent = false;
 
   // Legacy roots are not batched.
-  return new ReactSyncRoot(container, LegacyRoot, shouldHydrate);
+  //container是空的container,0,false
+  //ReactRoot是同步的
+  //sync 同步
+  //async 异步
+  return new ReactRoot(container, isConcurrent, shouldHydrate);
 }
-
+// null, element, container, false, callback,
 function legacyRenderSubtreeIntoContainer(
   parentComponent: ?React$Component<any, any>,
   children: ReactNodeList,
@@ -544,44 +575,76 @@ function legacyRenderSubtreeIntoContainer(
 ) {
   if (__DEV__) {
     topLevelUpdateWarnings(container);
-    warnOnInvalidCallback(callback === undefined ? null : callback, 'render');
   }
 
   // TODO: Without `any` type, Flow says "Property cannot be accessed on any
   // member of intersection type." Whyyyyyy.
-  let root: _ReactSyncRoot = (container._reactRootContainer: any);
-  let fiberRoot;
+  
+  //render中一般渲染的是DOM标签，所以不会有_reactRootContainer存在，
+  // 所以第一次渲染，root是不存在的
+  let root: Root = (container._reactRootContainer: any);
+  // 没有 root 会执行 if 中的操作
   if (!root) {
     // Initial mount
+    // 创建一个 root 出来，类型是 ReactRoot
     root = container._reactRootContainer = legacyCreateRootFromDOMContainer(
       container,
       forceHydrate,
     );
-    fiberRoot = root._internalRoot;
+    // 反正我从没传过 callback，不关心实现
     if (typeof callback === 'function') {
       const originalCallback = callback;
       callback = function() {
-        const instance = getPublicRootInstance(fiberRoot);
+        //根据fiberRoot获取公共Root实例
+        //就是fiberRoot.current.child.stateNode
+        const instance = getPublicRootInstance(root._internalRoot);
+        //通过该实例instance 去调用originalCallback方法
         originalCallback.call(instance);
       };
     }
     // Initial mount should not be batched.
+    // batchedUpdate 是 React 中很重要的一步，也就是批量更新
+    // this.setState({ age: 1 })
+    // this.setState({ age: 2 })
+    // this.setState({ age: 3 })
+    // 以上三次 setState 会被优化成一次更新，减少了渲染次数
+    // 但是对于 Root 来说没必要批量更新，直接调用回调函数
+
+    //初始化安装不应该批量更新
     unbatchedUpdates(() => {
-      updateContainer(children, fiberRoot, parentComponent, callback);
+      // 创建 root 的时候不可能存在 parentComponent，所以也跳过了
+      // 其实也不是没可能存在 parentComponent，如果在 root 上使用 context 就可以了
+      if (parentComponent != null) {
+        root.legacy_renderSubtreeIntoContainer(
+          parentComponent,
+          children,
+          callback,
+        );
+      } else {
+        // 调用的是 ReactRoot.prototype.render
+        root.render(children, callback);
+      }
     });
   } else {
-    fiberRoot = root._internalRoot;
     if (typeof callback === 'function') {
       const originalCallback = callback;
       callback = function() {
-        const instance = getPublicRootInstance(fiberRoot);
+        const instance = getPublicRootInstance(root._internalRoot);
         originalCallback.call(instance);
       };
     }
     // Update
-    updateContainer(children, fiberRoot, parentComponent, callback);
+    if (parentComponent != null) {
+      root.legacy_renderSubtreeIntoContainer(
+        parentComponent,
+        children,
+        callback,
+      );
+    } else {
+      root.render(children, callback);
+    }
   }
-  return getPublicRootInstance(fiberRoot);
+  return getPublicRootInstance(root._internalRoot);
 }
 
 function createPortal(
@@ -631,7 +694,7 @@ const ReactDOM: Object = {
     }
     return findHostInstance(componentOrElement);
   },
-
+  //服务端使用hydrate方法渲染节点
   hydrate(element: React$Node, container: DOMContainer, callback: ?Function) {
     invariant(
       isValidContainer(container),
@@ -651,16 +714,23 @@ const ReactDOM: Object = {
       null,
       element,
       container,
+      //true是让服务端尽可能复用节点，提高性能
       true,
       callback,
     );
   },
 
+  // 想必大家都写过 ReactDOM.render(<APP />, document.getElementById('root')
+  // 那么参数含义就不细讲了，另外第三个参数笔者没有用过，有兴趣了解的可以自行浏览文档
   render(
+    //元素
     element: React$Element<any>,
+    //容器
     container: DOMContainer,
+    //应用渲染结束后，调用的函数
     callback: ?Function,
   ) {
+    //错误抓取
     invariant(
       isValidContainer(container),
       'Target container is not a DOM element.',
@@ -674,10 +744,14 @@ const ReactDOM: Object = {
         enableStableConcurrentModeAPIs ? 'createRoot' : 'unstable_createRoot',
       );
     }
+    // 注意下 forceHydrate 参数，为 true 时是服务端渲染，这部分内容笔者不会讲到
+    // 调用 render 函数的话这个值永远为 false，调用 hydrate 函数的话这个值会为 true
+    //render方法本质是返回了函数legacyRenderSubtreeIntoContainer
     return legacyRenderSubtreeIntoContainer(
       null,
       element,
       container,
+      //render不会复用节点，因为是前端渲染
       false,
       callback,
     );
@@ -786,24 +860,16 @@ const ReactDOM: Object = {
 
   unstable_batchedUpdates: batchedUpdates,
 
-  // TODO remove this legacy method, unstable_discreteUpdates replaces it
-  unstable_interactiveUpdates: (fn, a, b, c) => {
-    flushDiscreteUpdates();
-    return discreteUpdates(fn, a, b, c);
-  },
-
-  unstable_discreteUpdates: discreteUpdates,
-  unstable_flushDiscreteUpdates: flushDiscreteUpdates,
+  unstable_interactiveUpdates: interactiveUpdates,
 
   flushSync: flushSync,
 
   unstable_createRoot: createRoot,
-  unstable_createSyncRoot: createSyncRoot,
   unstable_flushControlled: flushControlled,
 
   __SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED: {
     // Keep in sync with ReactDOMUnstableNativeDependencies.js
-    // ReactTestUtils.js, and ReactTestUtilsAct.js. This is an array for better minification.
+    // and ReactTestUtils.js. This is an array for better minification.
     Events: [
       getInstanceFromNode,
       getNodeFromInstance,
@@ -816,8 +882,6 @@ const ReactDOM: Object = {
       restoreStateIfNeeded,
       dispatchEvent,
       runEventsInBatch,
-      flushPassiveEffects,
-      IsThisRendererActing,
     ],
   },
 };
@@ -826,10 +890,7 @@ type RootOptions = {
   hydrate?: boolean,
 };
 
-function createRoot(
-  container: DOMContainer,
-  options?: RootOptions,
-): _ReactRoot {
+function createRoot(container: DOMContainer, options?: RootOptions): ReactRoot {
   const functionName = enableStableConcurrentModeAPIs
     ? 'createRoot'
     : 'unstable_createRoot';
@@ -838,29 +899,6 @@ function createRoot(
     '%s(...): Target container is not a DOM element.',
     functionName,
   );
-  warnIfReactDOMContainerInDEV(container);
-  const hydrate = options != null && options.hydrate === true;
-  return new ReactRoot(container, hydrate);
-}
-
-function createSyncRoot(
-  container: DOMContainer,
-  options?: RootOptions,
-): _ReactSyncRoot {
-  const functionName = enableStableConcurrentModeAPIs
-    ? 'createRoot'
-    : 'unstable_createRoot';
-  invariant(
-    isValidContainer(container),
-    '%s(...): Target container is not a DOM element.',
-    functionName,
-  );
-  warnIfReactDOMContainerInDEV(container);
-  const hydrate = options != null && options.hydrate === true;
-  return new ReactSyncRoot(container, BatchedRoot, hydrate);
-}
-
-function warnIfReactDOMContainerInDEV(container) {
   if (__DEV__) {
     warningWithoutStack(
       !container._reactRootContainer,
@@ -870,11 +908,13 @@ function warnIfReactDOMContainerInDEV(container) {
     );
     container._reactHasBeenPassedToCreateRootDEV = true;
   }
+  const hydrate = options != null && options.hydrate === true;
+  return new ReactRoot(container, true, hydrate);
 }
 
 if (enableStableConcurrentModeAPIs) {
   ReactDOM.createRoot = createRoot;
-  ReactDOM.createSyncRoot = createSyncRoot;
+  ReactDOM.unstable_createRoot = undefined;
 }
 
 const foundDevTools = injectIntoDevTools({

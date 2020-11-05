@@ -55,6 +55,8 @@ const fakeCallbackNode = {};
 // Except for NoPriority, these correspond to Scheduler priorities. We use
 // ascending numbers so we can compare them like numbers. They start at 90 to
 // avoid clashing with Scheduler's priorities.
+//除了90，用数字是因为这样做，方便比较
+//从90开始的原因是防止和Scheduler的优先级冲突
 export const ImmediatePriority: ReactPriorityLevel = 99;
 export const UserBlockingPriority: ReactPriorityLevel = 98;
 export const NormalPriority: ReactPriorityLevel = 97;
@@ -82,24 +84,29 @@ let initialTimeMs: number = Scheduler_now();
 // TODO: Consider lifting this into Scheduler.
 export const now =
   initialTimeMs < 10000 ? Scheduler_now : () => Scheduler_now() - initialTimeMs;
-
+//获取当前调度任务的优先级
 export function getCurrentPriorityLevel(): ReactPriorityLevel {
   switch (Scheduler_getCurrentPriorityLevel()) {
+      //99
     case Scheduler_ImmediatePriority:
       return ImmediatePriority;
+      //98
     case Scheduler_UserBlockingPriority:
       return UserBlockingPriority;
+      //97
     case Scheduler_NormalPriority:
       return NormalPriority;
+      //96
     case Scheduler_LowPriority:
       return LowPriority;
+      //95
     case Scheduler_IdlePriority:
       return IdlePriority;
     default:
       invariant(false, 'Unknown priority level.');
   }
 }
-
+//获取调度优先级
 function reactPriorityToSchedulerPriority(reactPriorityLevel) {
   switch (reactPriorityLevel) {
     case ImmediatePriority:
@@ -117,38 +124,53 @@ function reactPriorityToSchedulerPriority(reactPriorityLevel) {
   }
 }
 
+//获取调度优先级，并临时替换当前的优先级，去执行传进来的 callback
 export function runWithPriority<T>(
   reactPriorityLevel: ReactPriorityLevel,
   fn: () => T,
 ): T {
+  //获取调度优先级
   const priorityLevel = reactPriorityToSchedulerPriority(reactPriorityLevel);
+  //临时替换当前的优先级，去执行传进来的 callback
   return Scheduler_runWithPriority(priorityLevel, fn);
 }
-
+//对callback进行包装处理，并更新调度队列的状态
 export function scheduleCallback(
   reactPriorityLevel: ReactPriorityLevel,
   callback: SchedulerCallback,
   options: SchedulerCallbackOptions | void | null,
 ) {
+  //获取调度优先级
   const priorityLevel = reactPriorityToSchedulerPriority(reactPriorityLevel);
+  //返回经过包装处理的task
+
   return Scheduler_scheduleCallback(priorityLevel, callback, options);
 }
-
+//入队callback，并返回临时的队列
 export function scheduleSyncCallback(callback: SchedulerCallback) {
   // Push this callback into an internal queue. We'll flush these either in
   // the next tick, or earlier if something calls `flushSyncCallbackQueue`.
+  //在下次调度或调用 刷新同步回调队列 的时候刷新callback队列
+
+  //如果同步队列为空的话，则初始化同步队列，
+  //并在下次调度的一开始就刷新队列
   if (syncQueue === null) {
     syncQueue = [callback];
     // Flush the queue in the next tick, at the earliest.
     immediateQueueCallbackNode = Scheduler_scheduleCallback(
+      //赋予调度立即执行的高权限
       Scheduler_ImmediatePriority,
       flushSyncCallbackQueueImpl,
     );
-  } else {
+  }
+  //如果同步队列不为空的话，则将callback入队
+  else {
     // Push onto existing queue. Don't need to schedule a callback because
     // we already scheduled one when we created the queue.
+    //在入队的时候，不必去调度callback，因为在创建队列的时候就已经调度了
     syncQueue.push(callback);
   }
+  //fake我认为是临时队列的意思
   return fakeCallbackNode;
 }
 
@@ -157,30 +179,37 @@ export function cancelCallback(callbackNode: mixed) {
     Scheduler_cancelCallback(callbackNode);
   }
 }
-
+//刷新同步任务队列
 export function flushSyncCallbackQueue() {
+  //如果即时节点存在则中断当前节点任务，从链表中移除task节点
   if (immediateQueueCallbackNode !== null) {
     Scheduler_cancelCallback(immediateQueueCallbackNode);
   }
+  //更新同步队列
   flushSyncCallbackQueueImpl();
 }
-
+//更新同步队列
 function flushSyncCallbackQueueImpl() {
+  //如果同步队列未更新过并且同步队列不为空
   if (!isFlushingSyncQueue && syncQueue !== null) {
     // Prevent re-entrancy.
+    //防止重复执行，相当于一把锁
     isFlushingSyncQueue = true;
     let i = 0;
     try {
       const isSync = true;
       const queue = syncQueue;
+      //遍历同步队列，并更新刷新的状态isSync=true
       runWithPriority(ImmediatePriority, () => {
         for (; i < queue.length; i++) {
           let callback = queue[i];
           do {
+            //callback：renderRoot()
             callback = callback(isSync);
           } while (callback !== null);
         }
       });
+      //遍历结束后置为null
       syncQueue = null;
     } catch (error) {
       // If something throws, leave the remaining callbacks on the queue.

@@ -86,8 +86,6 @@
 
 import type {Fiber} from './ReactFiber';
 import type {ExpirationTime} from './ReactFiberExpirationTime';
-import type {SuspenseConfig} from './ReactFiberSuspenseConfig';
-import type {ReactPriorityLevel} from './SchedulerWithReactIntegration';
 
 import {NoWork} from './ReactFiberExpirationTime';
 import {
@@ -103,15 +101,12 @@ import {
 } from 'shared/ReactFeatureFlags';
 
 import {StrictMode} from './ReactTypeOfMode';
-import {markRenderEventTimeAndConfig} from './ReactFiberWorkLoop';
 
 import invariant from 'shared/invariant';
 import warningWithoutStack from 'shared/warningWithoutStack';
-import {getCurrentPriorityLevel} from './SchedulerWithReactIntegration';
 
 export type Update<State> = {
   expirationTime: ExpirationTime,
-  suspenseConfig: null | SuspenseConfig,
 
   tag: 0 | 1 | 2 | 3,
   payload: any,
@@ -119,9 +114,6 @@ export type Update<State> = {
 
   next: Update<State> | null,
   nextEffect: Update<State> | null,
-
-  //DEV only
-  priority?: ReactPriorityLevel,
 };
 
 export type UpdateQueue<State> = {
@@ -164,7 +156,9 @@ if (__DEV__) {
 export function createUpdateQueue<State>(baseState: State): UpdateQueue<State> {
   const queue: UpdateQueue<State> = {
     baseState,
+    // 链表头
     firstUpdate: null,
+    // 链表尾
     lastUpdate: null,
     firstCapturedUpdate: null,
     lastCapturedUpdate: null,
@@ -198,25 +192,18 @@ function cloneUpdateQueue<State>(
   return queue;
 }
 
-export function createUpdate(
-  expirationTime: ExpirationTime,
-  suspenseConfig: null | SuspenseConfig,
-): Update<*> {
-  let update: Update<*> = {
-    expirationTime,
-    suspenseConfig,
+export function createUpdate(expirationTime: ExpirationTime): Update<*> {
+  return {
+    expirationTime: expirationTime,
 
     tag: UpdateState,
+    // setState 的第一二个参数
     payload: null,
     callback: null,
-
+    // 用于在队列中找到下一个节点
     next: null,
     nextEffect: null,
   };
-  if (__DEV__) {
-    update.priority = getCurrentPriorityLevel();
-  }
-  return update;
 }
 
 function appendUpdateToQueue<State>(
@@ -235,20 +222,26 @@ function appendUpdateToQueue<State>(
 
 export function enqueueUpdate<State>(fiber: Fiber, update: Update<State>) {
   // Update queues are created lazily.
+  // 获取 fiber 的镜像
   const alternate = fiber.alternate;
   let queue1;
   let queue2;
+  // 第一次 render 的时候肯定是没有这个镜像的，所以进第一个条件
   if (alternate === null) {
     // There's only one fiber.
+    // 一开始也没这个 queue，所以需要创建一次
     queue1 = fiber.updateQueue;
     queue2 = null;
     if (queue1 === null) {
+      // UpdateQueue 是一个链表组成的队列
       queue1 = fiber.updateQueue = createUpdateQueue(fiber.memoizedState);
     }
   } else {
     // There are two owners.
     queue1 = fiber.updateQueue;
     queue2 = alternate.updateQueue;
+    // 以下就是在判断 q1、q2 存不存在了，不存在的话就赋值一遍
+    // clone 的意义也是为了节省开销
     if (queue1 === null) {
       if (queue2 === null) {
         // Neither fiber has an update queue. Create new ones.
@@ -269,6 +262,8 @@ export function enqueueUpdate<State>(fiber: Fiber, update: Update<State>) {
       }
     }
   }
+  // 获取队列操作完毕以后，就开始入队了
+  // 以下的代码很简单，熟悉链表的应该清楚链表添加一个节点的逻辑
   if (queue2 === null || queue1 === queue2) {
     // There's only a single queue.
     appendUpdateToQueue(queue1, update);
@@ -437,7 +432,7 @@ export function processUpdateQueue<State>(
   renderExpirationTime: ExpirationTime,
 ): void {
   hasForceUpdate = false;
-
+  // 获取的 queue 是在 WorkInProgress 上被拷贝的那份
   queue = ensureWorkInProgressQueueIsAClone(workInProgress, queue);
 
   if (__DEV__) {
@@ -452,8 +447,10 @@ export function processUpdateQueue<State>(
   // Iterate through the list of updates to compute the result.
   let update = queue.firstUpdate;
   let resultState = newBaseState;
+  // 遍历链表
   while (update !== null) {
     const updateExpirationTime = update.expirationTime;
+    // 判断优先级，是否需要跳过这个更新
     if (updateExpirationTime < renderExpirationTime) {
       // This update does not have sufficient priority. Skip it.
       if (newFirstUpdate === null) {
@@ -470,17 +467,9 @@ export function processUpdateQueue<State>(
         newExpirationTime = updateExpirationTime;
       }
     } else {
-      // This update does have sufficient priority.
-
-      // Mark the event time of this update as relevant to this render pass.
-      // TODO: This should ideally use the true event time of this update rather than
-      // its priority which is a derived and not reverseable value.
-      // TODO: We should skip this update if it was already committed but currently
-      // we have no way of detecting the difference between a committed and suspended
-      // update here.
-      markRenderEventTimeAndConfig(updateExpirationTime, update.suspenseConfig);
-
-      // Process it and compute a new result.
+      // This update does have sufficient priority. Process it and compute
+      // a new result.
+      // 获取 state
       resultState = getStateFromUpdate(
         workInProgress,
         queue,
@@ -489,6 +478,7 @@ export function processUpdateQueue<State>(
         props,
         instance,
       );
+      // 处理 callback
       const callback = update.callback;
       if (callback !== null) {
         workInProgress.effectTag |= Callback;
@@ -507,6 +497,7 @@ export function processUpdateQueue<State>(
   }
 
   // Separately, iterate though the list of captured updates.
+  // CapturedUpdate 不需要去关注
   let newFirstCapturedUpdate = null;
   update = queue.firstCapturedUpdate;
   while (update !== null) {

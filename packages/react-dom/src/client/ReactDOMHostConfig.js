@@ -44,11 +44,10 @@ import dangerousStyleValue from '../shared/dangerousStyleValue';
 import type {DOMContainer} from './ReactDOM';
 import type {
   ReactDOMEventResponder,
-  ReactDOMEventResponderInstance,
-  ReactDOMFundamentalComponentInstance,
+  ReactDOMEventComponentInstance,
 } from 'shared/ReactDOMTypes';
 import {
-  addRootEventTypesForResponderInstance,
+  addRootEventTypesForComponentInstance,
   mountEventResponder,
   unmountEventResponder,
 } from '../events/DOMEventResponderSystem';
@@ -90,6 +89,9 @@ export type PublicInstance = Element | Text;
 type HostContextDev = {
   namespace: string,
   ancestorInfo: mixed,
+  eventData: null | {|
+    isEventComponent?: boolean,
+  |},
 };
 type HostContextProd = string;
 export type HostContext = HostContextDev | HostContextProd;
@@ -101,8 +103,8 @@ export type NoTimeout = -1;
 import {
   enableSuspenseServerRenderer,
   enableFlareAPI,
-  enableFundamentalAPI,
 } from 'shared/ReactFeatureFlags';
+import warning from 'shared/warning';
 
 let SUPPRESS_HYDRATION_WARNING;
 if (__DEV__) {
@@ -118,8 +120,9 @@ const STYLE = 'style';
 
 let eventsEnabled: ?boolean = null;
 let selectionInformation: ?mixed = null;
-
+//可以 foucus 的节点返回autoFocus的值，否则返回 false
 function shouldAutoFocusHostComponent(type: string, props: Props): boolean {
+  //可以 foucus 的节点返回autoFocus的值，否则返回 false
   switch (type) {
     case 'button':
     case 'input':
@@ -160,7 +163,7 @@ export function getRootHostContext(
   if (__DEV__) {
     const validatedTag = type.toLowerCase();
     const ancestorInfo = updatedAncestorInfo(null, validatedTag);
-    return {namespace, ancestorInfo};
+    return {namespace, ancestorInfo, eventData: null};
   }
   return namespace;
 }
@@ -177,29 +180,52 @@ export function getChildHostContext(
       parentHostContextDev.ancestorInfo,
       type,
     );
-    return {namespace, ancestorInfo};
+    return {namespace, ancestorInfo, eventData: null};
   }
   const parentNamespace = ((parentHostContext: any): HostContextProd);
   return getChildNamespace(parentNamespace, type);
+}
+
+export function getChildHostContextForEventComponent(
+  parentHostContext: HostContext,
+): HostContext {
+  if (__DEV__) {
+    const parentHostContextDev = ((parentHostContext: any): HostContextDev);
+    const {namespace, ancestorInfo} = parentHostContextDev;
+    const eventData = {
+      isEventComponent: true,
+    };
+    return {namespace, ancestorInfo, eventData};
+  }
+  return parentHostContext;
 }
 
 export function getPublicInstance(instance: Instance): * {
   return instance;
 }
 
+//返回选中的DOM节点，一般为 document.activeElement || document.body
 export function prepareForCommit(containerInfo: Container): void {
+  //标记React浏览器事件发射器已启用
   eventsEnabled = ReactBrowserEventEmitterIsEnabled();
+  //返回选中的DOM节点，一般为 document.activeElement || document.body
   selectionInformation = getSelectionInformation();
+  //标记React浏览器事件发射器已关闭
   ReactBrowserEventEmitterSetEnabled(false);
 }
 
 export function resetAfterCommit(containerInfo: Container): void {
+  //selectionInformation 一般是 document.activeElement || document.body
   restoreSelection(selectionInformation);
   selectionInformation = null;
   ReactBrowserEventEmitterSetEnabled(eventsEnabled);
   eventsEnabled = null;
 }
 
+ //创建 DOM 实例
+ //1、创建 DOM 元素
+ //2、创建指向 fiber 对象的属性，方便从DOM 实例上获取 fiber 对象
+ //3、创建指向 props 的属性，方便从 DOM 实例上获取 props
 export function createInstance(
   type: string,
   props: Props,
@@ -209,31 +235,25 @@ export function createInstance(
 ): Instance {
   let parentNamespace: string;
   if (__DEV__) {
-    // TODO: take namespace into account when validating.
-    const hostContextDev = ((hostContext: any): HostContextDev);
-    validateDOMNesting(type, null, hostContextDev.ancestorInfo);
-    if (
-      typeof props.children === 'string' ||
-      typeof props.children === 'number'
-    ) {
-      const string = '' + props.children;
-      const ownAncestorInfo = updatedAncestorInfo(
-        hostContextDev.ancestorInfo,
-        type,
-      );
-      validateDOMNesting(null, string, ownAncestorInfo);
-    }
-    parentNamespace = hostContextDev.namespace;
+    //删除了 dev 代码
   } else {
+    //确定该节点的命名空间
+    // 一般是HTML，http://www.w3.org/1999/xhtml
+    //svg，为 http://www.w3.org/2000/svg ，请参考：https://developer.mozilla.org/zh-CN/docs/Web/SVG
+    //MathML,为 http://www.w3.org/1998/Math/MathML，请参考：https://developer.mozilla.org/zh-CN/docs/Web/MathML
+    //有兴趣的，请参考：https://blog.csdn.net/qq_26440903/article/details/52592501
     parentNamespace = ((hostContext: any): HostContextProd);
   }
+  //创建 DOM 元素
   const domElement: Instance = createElement(
     type,
     props,
     rootContainerInstance,
     parentNamespace,
   );
+  //创建指向 fiber 对象的属性，方便从DOM 实例上获取 fiber 对象
   precacheFiberNode(internalInstanceHandle, domElement);
+  //创建指向 props 的属性，方便从 DOM 实例上获取 props
   updateFiberProps(domElement, props);
   return domElement;
 }
@@ -244,7 +264,7 @@ export function appendInitialChild(
 ): void {
   parentInstance.appendChild(child);
 }
-
+ //初始化事件监听，
 export function finalizeInitialChildren(
   domElement: Instance,
   type: string,
@@ -252,10 +272,15 @@ export function finalizeInitialChildren(
   rootContainerInstance: Container,
   hostContext: HostContext,
 ): boolean {
+  //初始化 DOM 对象
+  //1、对一些标签进行事件绑定/属性的特殊处理
+  //2、对 DOM 对象内部属性进行初始化
   setInitialProperties(domElement, type, props, rootContainerInstance);
+  //可以 foucus 的节点返回autoFocus的值，否则返回 false
   return shouldAutoFocusHostComponent(type, props);
 }
 
+//比较更新得出需要更新的 props 的集合
 export function prepareUpdate(
   domElement: Instance,
   type: string,
@@ -264,21 +289,10 @@ export function prepareUpdate(
   rootContainerInstance: Container,
   hostContext: HostContext,
 ): null | Array<mixed> {
-  if (__DEV__) {
-    const hostContextDev = ((hostContext: any): HostContextDev);
-    if (
-      typeof newProps.children !== typeof oldProps.children &&
-      (typeof newProps.children === 'string' ||
-        typeof newProps.children === 'number')
-    ) {
-      const string = '' + newProps.children;
-      const ownAncestorInfo = updatedAncestorInfo(
-        hostContextDev.ancestorInfo,
-        type,
-      );
-      validateDOMNesting(null, string, ownAncestorInfo);
-    }
-  }
+  //删除了 dev 代码
+
+  //计算出新老 props 的差异
+  //return updatepayload:Array
   return diffProperties(
     domElement,
     type,
@@ -287,7 +301,7 @@ export function prepareUpdate(
     rootContainerInstance,
   );
 }
-
+//判断是否是文本节点
 export function shouldSetTextContent(type: string, props: Props): boolean {
   return (
     type === 'textarea' ||
@@ -304,18 +318,19 @@ export function shouldSetTextContent(type: string, props: Props): boolean {
 export function shouldDeprioritizeSubtree(type: string, props: Props): boolean {
   return !!props.hidden;
 }
-
+//创建文本节点的实例
 export function createTextInstance(
   text: string,
   rootContainerInstance: Container,
   hostContext: HostContext,
   internalInstanceHandle: Object,
 ): TextInstance {
-  if (__DEV__) {
-    const hostContextDev = ((hostContext: any): HostContextDev);
-    validateDOMNesting(null, text, hostContextDev.ancestorInfo);
-  }
+  //删除了 dev 代码
+
+  //创建文本节点
   const textNode: TextInstance = createTextNode(text, rootContainerInstance);
+  //将 fiber 对象作为文本节点的属性 __reactInternalInstance，
+  //方便从节点上找到 fiber 对象
   precacheFiberNode(internalInstanceHandle, textNode);
   return textNode;
 }
@@ -336,7 +351,7 @@ export const noTimeout = -1;
 // -------------------
 
 export const supportsMutation = true;
-
+ //判断是否是自动聚焦的 DOM 标签，是的话则调用 node.focus() 获取焦点
 export function commitMount(
   domElement: Instance,
   type: string,
@@ -349,6 +364,7 @@ export function commitMount(
   // does to implement the `autoFocus` attribute on the client). But
   // there are also other cases when this might happen (such as patching
   // up text content during hydration mismatch). So we'll check this again.
+  //判断是否是自动聚焦的 DOM 标签，是的话则调用 node.focus() 获取焦点
   if (shouldAutoFocusHostComponent(type, newProps)) {
     ((domElement: any):
       | HTMLButtonElement
@@ -358,6 +374,7 @@ export function commitMount(
   }
 }
 
+//进行节点的更新
 export function commitUpdate(
   domElement: Instance,
   updatePayload: Array<mixed>,
@@ -368,12 +385,16 @@ export function commitUpdate(
 ): void {
   // Update the props handle so that we know which props are the ones with
   // with current event handlers.
+
+  //挂载属性：node[internalEventHandlersKey] = props;
   updateFiberProps(domElement, newProps);
   // Apply the diff to the DOM node.
+  //更新 DOM 属性
   updateProperties(domElement, updatePayload, type, oldProps, newProps);
 }
-
+//将该 DOM 节点的 value 设置为 ''
 export function resetTextContent(domElement: Instance): void {
+  //给 DOM 节点设置text
   setTextContent(domElement, '');
 }
 
@@ -815,104 +836,43 @@ export function didNotFindHydratableSuspenseInstance(
   }
 }
 
-export function mountResponderInstance(
-  responder: ReactDOMEventResponder,
-  responderInstance: ReactDOMEventResponderInstance,
-  responderProps: Object,
-  responderState: Object,
-  instance: Instance,
-  rootContainerInstance: Container,
-): ReactDOMEventResponderInstance {
-  // Listen to events
-  const doc = rootContainerInstance.ownerDocument;
-  const documentBody = doc.body || doc;
-  const {
-    rootEventTypes,
-    targetEventTypes,
-  } = ((responder: any): ReactDOMEventResponder);
-  if (targetEventTypes !== null) {
-    listenToEventResponderEventTypes(targetEventTypes, documentBody);
+export function mountEventComponent(
+  eventComponentInstance: ReactDOMEventComponentInstance,
+): void {
+  if (enableFlareAPI) {
+    const rootContainerInstance = ((eventComponentInstance.rootInstance: any): Container);
+    const doc = rootContainerInstance.ownerDocument;
+    const documentBody = doc.body || doc;
+    const responder = eventComponentInstance.responder;
+    const {
+      rootEventTypes,
+      targetEventTypes,
+    } = ((responder: any): ReactDOMEventResponder);
+    if (targetEventTypes !== undefined) {
+      listenToEventResponderEventTypes(targetEventTypes, documentBody);
+    }
+    if (rootEventTypes !== undefined) {
+      addRootEventTypesForComponentInstance(
+        eventComponentInstance,
+        rootEventTypes,
+      );
+      listenToEventResponderEventTypes(rootEventTypes, documentBody);
+    }
+    mountEventResponder(eventComponentInstance);
   }
-  if (rootEventTypes !== null) {
-    addRootEventTypesForResponderInstance(responderInstance, rootEventTypes);
-    listenToEventResponderEventTypes(rootEventTypes, documentBody);
-  }
-  mountEventResponder(
-    responder,
-    responderInstance,
-    responderProps,
-    responderState,
-  );
-  return responderInstance;
 }
 
-export function unmountResponderInstance(
-  responderInstance: ReactDOMEventResponderInstance,
+export function updateEventComponent(
+  eventComponentInstance: ReactDOMEventComponentInstance,
+): void {
+  // NO-OP, why might use this in the future
+}
+
+export function unmountEventComponent(
+  eventComponentInstance: ReactDOMEventComponentInstance,
 ): void {
   if (enableFlareAPI) {
     // TODO stop listening to targetEventTypes
-    unmountEventResponder(responderInstance);
-  }
-}
-
-export function getFundamentalComponentInstance(
-  fundamentalInstance: ReactDOMFundamentalComponentInstance,
-): Instance {
-  if (enableFundamentalAPI) {
-    const {currentFiber, impl, props, state} = fundamentalInstance;
-    const instance = impl.getInstance(null, props, state);
-    precacheFiberNode(currentFiber, instance);
-    return instance;
-  }
-  // Because of the flag above, this gets around the Flow error;
-  return (null: any);
-}
-
-export function mountFundamentalComponent(
-  fundamentalInstance: ReactDOMFundamentalComponentInstance,
-): void {
-  if (enableFundamentalAPI) {
-    const {impl, instance, props, state} = fundamentalInstance;
-    const onMount = impl.onMount;
-    if (onMount !== undefined) {
-      onMount(null, instance, props, state);
-    }
-  }
-}
-
-export function shouldUpdateFundamentalComponent(
-  fundamentalInstance: ReactDOMFundamentalComponentInstance,
-): boolean {
-  if (enableFundamentalAPI) {
-    const {impl, prevProps, props, state} = fundamentalInstance;
-    const shouldUpdate = impl.shouldUpdate;
-    if (shouldUpdate !== undefined) {
-      return shouldUpdate(null, prevProps, props, state);
-    }
-  }
-  return true;
-}
-
-export function updateFundamentalComponent(
-  fundamentalInstance: ReactDOMFundamentalComponentInstance,
-): void {
-  if (enableFundamentalAPI) {
-    const {impl, instance, prevProps, props, state} = fundamentalInstance;
-    const onUpdate = impl.onUpdate;
-    if (onUpdate !== undefined) {
-      onUpdate(null, instance, prevProps, props, state);
-    }
-  }
-}
-
-export function unmountFundamentalComponent(
-  fundamentalInstance: ReactDOMFundamentalComponentInstance,
-): void {
-  if (enableFundamentalAPI) {
-    const {impl, instance, props, state} = fundamentalInstance;
-    const onUnmount = impl.onUnmount;
-    if (onUnmount !== undefined) {
-      onUnmount(null, instance, props, state);
-    }
+    unmountEventResponder(eventComponentInstance);
   }
 }

@@ -10,6 +10,10 @@ import lowPriorityWarning from 'shared/lowPriorityWarning';
 
 import ReactNoopUpdateQueue from './ReactNoopUpdateQueue';
 
+// 该文件包含两个基本组件，分别为 Component 及 PureComponent
+// 没看这个文件之前以为 Component 会很复杂，内部需要处理一大堆逻辑
+// 其实简单的一匹
+
 const emptyObject = {};
 if (__DEV__) {
   Object.freeze(emptyObject);
@@ -22,21 +26,36 @@ function Component(props, context, updater) {
   this.props = props;
   this.context = context;
   // If a component has string refs, we will assign a different object later.
+  // ref 有好几个方式创建，字符串的不讲了，一般都是通过传入一个函数来给一个变量赋值 ref 的
+  // ref={el => this.el = el} 这种方式最推荐
+  // 当然还有种方式是通过 React.createRef 创建一个 ref 变量，然后这样使用
+  // this.el = React.createRef()
+  // ref={this.el}
+  // 关于 React.createRef 就阅读 ReactCreateRef.js 文件了
   this.refs = emptyObject;
   // We initialize the default updater but the real one gets injected by the
   // renderer.
+  // 如果你在组件中打印 this 的话，可能看到过 updater 这个属性
+  // 有兴趣可以去看看 ReactNoopUpdateQueue 中的内容，虽然没几个 API，并且也基本没啥用，都是用来报警告的
+  // 虽然给updater赋了默认值，但真正的updater是在renderer中注册的
   this.updater = updater || ReactNoopUpdateQueue;
 }
-
+//原型上赋了一个flag
 Component.prototype.isReactComponent = {};
 
 /**
+ * 使用setState来改变Component内部的变量
+ * 
  * Sets a subset of the state. Always use this to mutate
  * state. You should treat `this.state` as immutable.
  *
+ * this.state并不是立即更新的，所以在调用this.setState后可能 不能 拿到新值
+ * 
  * There is no guarantee that `this.state` will be immediately updated, so
  * accessing `this.state` after calling this method may return the old value.
  *
+ * 不能保证this.state是同步的（它也不是异步的），使用回调获取最新值
+ * 
  * There is no guarantee that calls to `setState` will run synchronously,
  * as they may eventually be batched together.  You can provide an optional
  * callback that will be executed when the call to setState is actually
@@ -55,7 +74,16 @@ Component.prototype.isReactComponent = {};
  * @final
  * @protected
  */
+// 我们在组件中调用 setState 其实就是调用到这里了
+// 用法不说了，如果不清楚的把上面的注释和相应的文档看一下就行
+// 一开始以为 setState 一大堆逻辑，结果就是调用了 updater 里的方法
+// 所以 updater 还是个蛮重要的东西
+
+//partialState：要更新的state，可以是Object/Function
+//callback： setState({xxx},callback)
 Component.prototype.setState = function(partialState, callback) {
+  // 判断setState中的partialState是否符合条件，
+  // 如果不符合则抛出Error
   invariant(
     typeof partialState === 'object' ||
       typeof partialState === 'function' ||
@@ -63,6 +91,8 @@ Component.prototype.setState = function(partialState, callback) {
     'setState(...): takes an object of state variables to update or a ' +
       'function which returns an object of state variables.',
   );
+  //重要！state的更新机制
+  //在react-dom中实现，不在react中实现
   this.updater.enqueueSetState(this, partialState, callback, 'setState');
 };
 
@@ -70,9 +100,14 @@ Component.prototype.setState = function(partialState, callback) {
  * Forces an update. This should only be invoked when it is known with
  * certainty that we are **not** in a DOM transaction.
  *
+ * 在Component的深层次改变但未调用setState时，使用该方法
+ * 
  * You may want to call this when you know that some deeper aspect of the
  * component's state has changed but `setState` was not called.
  *
+ * forceUpdate不调用shouldComponentUpdate方法，
+ * 但会调用componentWillUpdate和componentDidUpdate方法
+ * 
  * This will not invoke `shouldComponentUpdate`, but it will invoke
  * `componentWillUpdate` and `componentDidUpdate`.
  *
@@ -80,6 +115,7 @@ Component.prototype.setState = function(partialState, callback) {
  * @final
  * @protected
  */
+//强制Component更新一次，无论props/state是否更新
 Component.prototype.forceUpdate = function(callback) {
   this.updater.enqueueForceUpdate(this, callback, 'forceUpdate');
 };
@@ -122,7 +158,10 @@ if (__DEV__) {
   }
 }
 
+// 以下做的都是继承功能，让 PureComponent 继承自 Component
 function ComponentDummy() {}
+
+//ComponentDummy的原型 继承 Component的原型
 ComponentDummy.prototype = Component.prototype;
 
 /**
@@ -136,10 +175,21 @@ function PureComponent(props, context, updater) {
   this.updater = updater || ReactNoopUpdateQueue;
 }
 
+//PureComponent是继承自Component的,下面三行就是在继承Component
+
+//将Component的方法拷贝到pureComponentPrototype上
+// 用ComponentDummy的原因是为了不直接实例化一个Component实例，可以减少一些内存使用
 const pureComponentPrototype = (PureComponent.prototype = new ComponentDummy());
 pureComponentPrototype.constructor = PureComponent;
 // Avoid an extra prototype jump for these methods.
+//避免多一次原型链查找,因为上面两句已经让PureComponent继承了Component
+//下面多写了一句Object.assign()，是为了避免多一次原型链查找
+
+// Object.assign是浅拷贝，
+// 将Component.prototype上的方法都复制到PureComponent.prototype上
+// 也就是pureComponent的原型上
 Object.assign(pureComponentPrototype, Component.prototype);
+// 通过这个变量区别下普通的 Component
 pureComponentPrototype.isPureReactComponent = true;
 
 export {Component, PureComponent};
